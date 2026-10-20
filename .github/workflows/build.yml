@@ -156,7 +156,15 @@ jobs:
         run: |
           rm -rf \
             .buildozer/android/platform/build-arm64-v8a/build/other_builds/python3
-
+            
+      - name: Download Arabic font
+        run: |
+          mkdir -p assets/fonts
+          curl -fL --retry 3 \
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/notonaskharabic/NotoNaskhArabic%5Bwght%5D.ttf" \
+            -o assets/fonts/NotoNaskhArabic.ttf
+          test -s assets/fonts/NotoNaskhArabic.ttf
+          
       - name: Build APK
         shell: bash
         run: |
