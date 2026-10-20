@@ -34,8 +34,7 @@ jobs:
             autoconf automake libtool \
             pkg-config zlib1g-dev \
             libncurses5-dev libncursesw5-dev \
-            libtinfo5 cmake \
-            libffi-dev libssl-dev \
+            cmake libffi-dev libssl-dev \
             build-essential ccache
 
       - name: Install Buildozer
@@ -58,61 +57,49 @@ jobs:
           echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
-          echo "Android SDK path: $SDK"
-
           if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "ERROR: sdkmanager was not found at:"
-            echo "$SDK/cmdline-tools/latest/bin/sdkmanager"
+            echo "ERROR: sdkmanager not found."
             exit 1
           fi
 
-      - name: Accept Android SDK Licenses
+          echo "SDK path: $SDK"
+
+      - name: Accept Licenses and Install SDK Packages
         shell: bash
         run: |
-          set +e
+          set -euo pipefail
 
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
-          sdk_status=${PIPESTATUS[1]}
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          echo "sdkmanager exit code: $sdk_status"
+          yes | "$SDKMANAGER" --licenses || true
 
-          if [ "$sdk_status" -ne 0 ]; then
-            echo "Checking license status..."
-
-            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses < /dev/null
-            check_status=$?
-
-            if [ "$check_status" -ne 0 ]; then
-              echo "ERROR: Android SDK license verification failed."
-              exit "$check_status"
-            fi
-          fi
-
-          echo "License step completed."
-
-      - name: Install Android SDK Packages
-        shell: bash
-        run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.0"
+            "build-tools;37.0.0"
+
+          if [ ! -x "$ANDROID_HOME/build-tools/37.0.0/aidl" ]; then
+            echo "ERROR: AIDL was not installed."
+            ls -la "$ANDROID_HOME/build-tools" || true
+            exit 1
+          fi
+
+          echo "Android SDK packages installed successfully."
 
       - name: Verify Android SDK
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-
           java -version
           python --version
 
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed
 
+          ls -l "$ANDROID_HOME/build-tools/37.0.0/aidl"
+
       - name: Build APK
         shell: bash
         run: |
           if [ ! -f buildozer.spec ]; then
-            echo "ERROR: buildozer.spec was not found in the repository root."
+            echo "ERROR: buildozer.spec not found in repository root."
             exit 1
           fi
 
