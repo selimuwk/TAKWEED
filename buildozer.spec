@@ -6,7 +6,7 @@ package.name = takweedcustomercoding
 package.domain = com.mohamedselim
 
 source.dir = .
-source.include_exts = py,kv,png,jpg,jpeg,json,txt
+source.include_exts = py,kv,png,jpg,jpeg,json,txt,ttf
 
 version = 1.0.0
 
