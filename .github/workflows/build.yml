@@ -80,7 +80,7 @@ jobs:
       - name: Build APK
         run: |
           set -o pipefail
-          yes | buildozer -v android debug 2>&1 | tee build.log
+          buildozer -v android debug 2>&1 | tee build.log
         env:
           P4A_RELEASE: "0"
           ac_cv_func_getgrent: "no"
