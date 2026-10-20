@@ -46,38 +46,70 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install buildozer cython==0.29.36
 
+      - name: Prepare Android SDK and accept licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK"
+
+          echo "===== Locate sdkmanager ====="
+          SDKMANAGER="$(find "$SDK" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found in Buildozer SDK; Buildozer will initialize it."
+            buildozer android debug 2>&1 | tee sdk-init.log || true
+            SDKMANAGER="$(find "$SDK" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager could not be located."
+            find "$SDK" -maxdepth 5 -type f -print 2>/dev/null | head -200 || true
+            exit 1
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses
+          LICENSE_STATUS=${PIPESTATUS[1]}
+          set -o pipefail
+
+          if [ "$LICENSE_STATUS" -ne 0 ]; then
+            echo "ERROR: Android SDK license acceptance failed."
+            exit "$LICENSE_STATUS"
+          fi
+
+          "$SDKMANAGER" --sdk_root="$SDK" "platform-tools" "build-tools;37.0.0"
+
       - name: Verify source and configuration
         run: |
           echo "===== Commit being built ====="
           git rev-parse HEAD
 
-          echo "===== Workflow file ====="
-          cat .github/workflows/build.yml
-
           echo "===== Buildozer configuration ====="
           cat buildozer.spec
 
           echo "===== Relevant settings ====="
-          grep -nE 'requirements|p4a.branch|android.ndk_api|android.minapi|android.api' buildozer.spec
+          grep -nE 'requirements|p4a.branch|android.ndk|android.ndk_api|android.minapi|android.api' buildozer.spec
 
-          echo "===== Search for old Python pins ====="
-          grep -RIn '3.12.10' .github buildozer.spec || true
+          echo "===== Check Python pins ====="
+          grep -q 'python3==3.13.7' buildozer.spec
+          grep -q 'hostpython3==3.13.7' buildozer.spec
+          grep -q 'p4a.branch = develop' buildozer.spec
 
           echo "===== Tool versions ====="
           python --version
           java -version
           buildozer --version
 
-          echo "===== Validate Python versions ====="
-          grep -q 'python3==3.13.7' buildozer.spec
-          grep -q 'hostpython3==3.13.7' buildozer.spec
-          grep -q 'p4a.branch = develop' buildozer.spec
-
       - name: Clean failed Python build
         run: |
           rm -rf .buildozer/android/platform/build-arm64-v8a/build/other_builds/python3
 
       - name: Build APK
+        shell: bash
         run: |
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
@@ -88,6 +120,8 @@ jobs:
       - name: Verify APK
         if: success()
         run: |
+          set -e
+          echo "===== APK files ====="
           find bin -maxdepth 1 -type f -name "*.apk" -print
           test -n "$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
 
@@ -100,11 +134,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build log
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TAKWEED-Build-Log
-          path: build.log
+          name: TAKWEED-Build-Logs
+          path: |
+            build.log
+            sdk-init.log
           if-no-files-found: ignore
           retention-days: 7
