@@ -69,8 +69,8 @@ jobs:
           buildozer --version
 
           echo "===== Validate Python versions ====="
-          grep -q 'python3==3.12.10' buildozer.spec
-          grep -q 'hostpython3==3.12.10' buildozer.spec
+          grep -q 'python3==3.13.7' buildozer.spec
+          grep -q 'hostpython3==3.13.7' buildozer.spec
           grep -q 'p4a.branch = develop' buildozer.spec
 
       - name: Clean failed Python build
