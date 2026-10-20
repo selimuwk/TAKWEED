@@ -1,4 +1,4 @@
-
+```yaml
 name: Build TAKWEED Android APK
 
 on:
@@ -7,70 +7,85 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-22.04
-
-    env:
-      P4A_RELEASE: "1"
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout project
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Java
-        uses: actions/setup-java@v4
+      - name: Set Up Python
+        uses: actions/setup-python@v5
         with:
-          distribution: temurin
-          java-version: "17"
+          python-version: "3.11"
 
-      - name: Install system dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            git \
-            zip \
-            unzip \
-            autoconf \
-            libtool \
-            pkg-config \
-            zlib1g-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            cmake \
-            libffi-dev \
-            libssl-dev
+            git zip unzip \
+            openjdk-17-jdk \
+            autoconf automake libtool pkg-config \
+            zlib1g-dev libncurses-dev \
+            libffi-dev libssl-dev \
+            cmake ccache
+
+      - name: Set Up Java
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
 
       - name: Install Buildozer
         run: |
-          python -m pip install --upgrade pip
-          pip install buildozer "Cython==0.29.36"
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install buildozer cython==0.29.36
 
-      - name: Initialize Android SDK
+      - name: Verify Project Files
         run: |
-          buildozer android debug || true
+          echo "Repository files:"
+          ls -la
 
-      - name: Accept Android SDK licenses
-        run: |
-          SDK="$HOME/.buildozer/android/platform/android-sdk"
-          if [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" --licenses
-          elif [ -x "$SDK/tools/bin/sdkmanager" ]; then
-            yes | "$SDK/tools/bin/sdkmanager" --sdk_root="$SDK" --licenses
-          else
-            echo "sdkmanager not found in the expected SDK folders"
-            find "$HOME/.buildozer" -type f -name sdkmanager 2>/dev/null || true
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec was not found."
             exit 1
           fi
 
-      - name: Build APK
+          echo "Buildozer configuration found."
+
+      - name: Fix Android SDK Manager Path
         run: |
-          yes | buildozer android debug
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
+
+          if [ -f "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            mkdir -p "$SDK/tools/bin"
+            ln -sf \
+              "$SDK/cmdline-tools/latest/bin/sdkmanager" \
+              "$SDK/tools/bin/sdkmanager"
+            echo "SDK Manager compatibility link created."
+          else
+            echo "SDK Manager not installed yet or path differs."
+            echo "Buildozer will initialize the Android SDK."
+          fi
+
+      - name: Build TAKWEED APK
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+          P4A_RELEASE: "0"
+        run: |
+          buildozer -v android debug
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TAKWEED-APK
+          name: TAKWEED-Android-APK
           path: bin/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 14
+```
