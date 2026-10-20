@@ -1,3 +1,4 @@
+
 name: Build Android APK
 
 on:
@@ -72,12 +73,17 @@ jobs:
           grep -q 'hostpython3==3.12.10' buildozer.spec
           grep -q 'p4a.branch = develop' buildozer.spec
 
+      - name: Clean failed Python build
+        run: |
+          rm -rf .buildozer/android/platform/build-arm64-v8a/build/other_builds/python3
+
       - name: Build APK
         run: |
           set -o pipefail
           yes | buildozer -v android debug 2>&1 | tee build.log
         env:
           P4A_RELEASE: "0"
+          ac_cv_func_getgrent: "no"
 
       - name: Verify APK
         if: success()
