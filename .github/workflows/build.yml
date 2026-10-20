@@ -1,3 +1,4 @@
+```yaml
 name: Build Android APK
 
 on:
@@ -44,11 +45,12 @@ jobs:
           python -m pip install buildozer cython==0.29.36
 
       - name: Configure Android SDK
+        shell: bash
         run: |
-          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
           if [ -z "$SDK" ]; then
-            echo "Android SDK path is not configured."
+            echo "ERROR: Android SDK path is not configured."
             exit 1
           fi
 
@@ -57,16 +59,40 @@ jobs:
           echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
-          echo "Android SDK: $SDK"
-          ls -la "$SDK/cmdline-tools/latest/bin"
+          echo "Android SDK path: $SDK"
+
+          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "ERROR: sdkmanager was not found at:"
+            echo "$SDK/cmdline-tools/latest/bin/sdkmanager"
+            exit 1
+          fi
 
       - name: Accept Android SDK Licenses
         shell: bash
         run: |
-          set -o pipefail
+          set +e
+
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          sdk_status=${PIPESTATUS[1]}
+
+          echo "sdkmanager exit code: $sdk_status"
+
+          if [ "$sdk_status" -ne 0 ]; then
+            echo "Checking license status..."
+
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses < /dev/null
+            check_status=$?
+
+            if [ "$check_status" -ne 0 ]; then
+              echo "ERROR: Android SDK license verification failed."
+              exit "$check_status"
+            fi
+          fi
+
+          echo "License step completed."
 
       - name: Install Android SDK Packages
+        shell: bash
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platform-tools" \
@@ -77,15 +103,17 @@ jobs:
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
           java -version
           python --version
+
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed
 
       - name: Build APK
+        shell: bash
         run: |
           if [ ! -f buildozer.spec ]; then
             echo "ERROR: buildozer.spec was not found in the repository root."
-            echo "Make sure the project files are in the correct directory."
             exit 1
           fi
 
@@ -96,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Android-APK
-          path: |
-            bin/*.apk
+          path: bin/*.apk
           if-no-files-found: warn
           retention-days: 7
+```
