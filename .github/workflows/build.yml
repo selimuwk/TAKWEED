@@ -11,6 +11,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      P4A_RELEASE: "1"
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -42,74 +45,55 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install buildozer cython==0.29.36
 
-      - name: Configure Android SDK
+      - name: Prepare Android Environment
         shell: bash
         run: |
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          python --version
 
-          if [ -z "$SDK" ]; then
-            echo "ERROR: Android SDK path is not configured."
+          mkdir -p "$HOME/.android"
+          touch "$HOME/.android/repositories.cfg"
+
+      - name: Check Project Files
+        shell: bash
+        run: |
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec was not found in the repository root."
+            echo "Repository files:"
+            ls -la
             exit 1
           fi
 
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          echo "buildozer.spec found."
+          grep -E '^(title|package.name|package.domain|requirements|android.api|android.minapi|android.ndk|p4a.branch|p4a.bootstrap) *=' buildozer.spec || true
 
-          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "ERROR: sdkmanager not found."
-            exit 1
-          fi
-
-          echo "SDK path: $SDK"
-
-      - name: Accept Licenses and Install SDK Packages
+      - name: Initialize Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK"
 
-          yes | "$SDKMANAGER" --licenses || true
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;37.0.0"
-
-          if [ ! -x "$ANDROID_HOME/build-tools/37.0.0/aidl" ]; then
-            echo "ERROR: AIDL was not installed."
-            ls -la "$ANDROID_HOME/build-tools" || true
-            exit 1
-          fi
-
-          echo "Android SDK packages installed successfully."
-
-      - name: Verify Android SDK
-        run: |
-          java -version
-          python --version
-
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed
-
-          ls -l "$ANDROID_HOME/build-tools/37.0.0/aidl"
+          echo "Buildozer SDK directory: $SDK"
 
       - name: Build APK
         shell: bash
         run: |
-          if [ ! -f buildozer.spec ]; then
-            echo "ERROR: buildozer.spec not found in repository root."
-            exit 1
-          fi
-
-          buildozer android debug
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
 
       - name: Upload APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Android-APK
-          path: bin/*.apk
+          name: Android-Build-Files
+          path: |
+            bin/*.apk
+            build.log
           if-no-files-found: warn
           retention-days: 7
