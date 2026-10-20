@@ -30,7 +30,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip \
+            git zip unzip curl \
             autoconf automake libtool \
             pkg-config zlib1g-dev \
             libncurses5-dev libncursesw5-dev \
@@ -51,17 +51,86 @@ jobs:
 
           java -version
           python --version
+          buildozer --version
 
       - name: Validate Project
         shell: bash
         run: |
+          set -euo pipefail
+
           if [ ! -f buildozer.spec ]; then
-            echo "ERROR: buildozer.spec not found in repository root."
+            echo "ERROR: buildozer.spec not found."
             ls -la
             exit 1
           fi
 
           echo "Project configuration found."
+
+      - name: Configure Android Build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("buildozer.spec")
+          text = path.read_text(encoding="utf-8")
+
+          # Pin the Android application's Python version.
+          requirements = (
+              "python3==3.12.10,kivy,requests,certifi,plyer"
+          )
+
+          text, req_count = re.subn(
+              r"(?m)^(\s*requirements\s*=\s*).*$",
+              lambda m: m.group(1) + requirements,
+              text,
+              count=1,
+          )
+
+          if req_count != 1:
+              raise SystemExit(
+                  "ERROR: Could not find requirements in buildozer.spec"
+              )
+
+          # Explicitly align the NDK API with Android minimum API 24.
+          if re.search(r"(?m)^\s*android\.ndk_api\s*=", text):
+              text = re.sub(
+                  r"(?m)^(\s*android\.ndk_api\s*=\s*).*$",
+                  r"\g<1>24",
+                  text,
+                  count=1,
+              )
+          else:
+              match = re.search(
+                  r"(?m)^\s*android\.minapi\s*=.*$",
+                  text,
+              )
+
+              if not match:
+                  raise SystemExit(
+                      "ERROR: android.minapi not found in buildozer.spec"
+                  )
+
+              text = (
+                  text[:match.end()]
+                  + "\nandroid.ndk_api = 24"
+                  + text[match.end():]
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("Updated Android build settings:")
+          for line in text.splitlines():
+              if re.match(
+                  r"^\s*(requirements|android\.api|android\.minapi|"
+                  r"android\.ndk_api|p4a\.branch)\s*=",
+                  line,
+              ):
+                  print(line)
+          PY
 
       - name: Preinstall Android SDK Command-line Tools
         shell: bash
@@ -71,14 +140,7 @@ jobs:
           SDK="$HOME/.buildozer/android/platform/android-sdk"
           mkdir -p "$SDK"
 
-          if [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "Android SDK command-line tools already exist."
-          else
-            echo "Installing Android SDK command-line tools..."
-
-            sudo apt-get update
-            sudo apt-get install -y curl
-
+          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
             TOOLS_ZIP="$RUNNER_TEMP/commandlinetools.zip"
             TOOLS_DIR="$RUNNER_TEMP/android-cmdline-tools"
 
@@ -89,14 +151,17 @@ jobs:
               -o "$TOOLS_ZIP"
 
             unzip -q "$TOOLS_ZIP" -d "$TOOLS_DIR"
+
             mkdir -p "$SDK/cmdline-tools/latest"
-            cp -a "$TOOLS_DIR/cmdline-tools/." "$SDK/cmdline-tools/latest/"
+            cp -a "$TOOLS_DIR/cmdline-tools/." \
+              "$SDK/cmdline-tools/latest/"
           fi
 
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
           mkdir -p "$SDK/tools/bin"
+
           ln -sfn \
             "$SDK/cmdline-tools/latest/bin/sdkmanager" \
             "$SDK/tools/bin/sdkmanager"
@@ -113,7 +178,6 @@ jobs:
 
           yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses || true
 
-          echo "Checking installed SDK licenses..."
           "$SDKMANAGER" --sdk_root="$SDK" --list_installed
 
       - name: Install Android SDK Packages
@@ -131,11 +195,10 @@ jobs:
 
           if [ ! -x "$SDK/build-tools/37.0.0/aidl" ]; then
             echo "ERROR: AIDL was not installed."
-            ls -la "$SDK/build-tools" || true
             exit 1
           fi
 
-          echo "Build Tools 37 and AIDL are available."
+          echo "Android SDK packages installed."
 
       - name: Fix Legacy SDK Manager Path
         shell: bash
@@ -155,7 +218,25 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+
           buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Verify APK
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_COUNT=$(find bin -maxdepth 1 -type f -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: Build completed but no APK was found."
+            exit 1
+          fi
+
+          echo "APK files created:"
+          find bin -maxdepth 1 -type f -name "*.apk" \
+            -exec ls -lh {} \;
 
       - name: Upload APK and Build Log
         if: always()
