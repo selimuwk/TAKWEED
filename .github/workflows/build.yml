@@ -11,8 +11,9 @@ permissions:
 
 jobs:
   build:
+    name: Build TAKWEED
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Checkout Repository
@@ -30,10 +31,15 @@ jobs:
           echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
           echo "/usr/lib/jvm/java-17-openjdk-amd64/bin" >> "$GITHUB_PATH"
 
+      - name: Verify Java
+        run: |
+          java -version
+          javac -version
+
       - name: Install System Dependencies
         run: |
           sudo apt-get install -y \
-            git zip unzip \
+            git zip unzip curl \
             autoconf automake libtool pkg-config \
             zlib1g-dev libncurses-dev \
             libffi-dev libssl-dev \
@@ -44,48 +50,65 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install buildozer cython==0.29.36
 
-      - name: Verify Project
+      - name: Verify Project Files
         run: |
-          test -f buildozer.spec
+          test -f buildozer.spec || {
+            echo "ERROR: buildozer.spec not found"
+            exit 1
+          }
 
-      - name: Initialize Android SDK
+          echo "Buildozer configuration:"
+          grep -E '^(title|package.name|package.domain|requirements|android.api|android.minapi|android.ndk|android.archs|p4a.branch)[[:space:]]*=' buildozer.spec || true
+
+      - name: Install Android SDK Components
         run: |
           SDK="$HOME/.buildozer/android/platform/android-sdk"
           mkdir -p "$SDK/cmdline-tools"
 
           if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            mkdir -p /tmp/android-cli
             curl -fsSL \
               https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
               -o /tmp/android-cli.zip
+
+            mkdir -p /tmp/android-cli
             unzip -q /tmp/android-cli.zip -d /tmp/android-cli
+
             mkdir -p "$SDK/cmdline-tools/latest"
             cp -r /tmp/android-cli/cmdline-tools/. \
               "$SDK/cmdline-tools/latest/"
           fi
+
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses || true
+
+          "$SDKMANAGER" --sdk_root="$SDK" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
-          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            --sdk_root="$SDK" --licenses || true
-
-          "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            --sdk_root="$SDK" \
-            "platform-tools" \
-            "platforms;android-33" \
-            "build-tools;33.0.2"
-
           mkdir -p "$SDK/tools/bin"
-          ln -sf "$SDK/cmdline-tools/latest/bin/sdkmanager" \
-            "$SDK/tools/bin/sdkmanager"
+          ln -sf "$SDKMANAGER" "$SDK/tools/bin/sdkmanager"
 
-          test -x "$SDK/build-tools/33.0.2/aidl"
-          "$SDK/build-tools/33.0.2/aidl" || test "$?" -eq 1
+          echo "Checking AIDL..."
+          test -x "$SDK/build-tools/35.0.0/aidl"
+          "$SDK/build-tools/35.0.0/aidl" || test "$?" -eq 1
+
+      - name: Clean Previous Build
+        run: |
+          buildozer android clean || true
+          rm -rf .buildozer
+          mkdir -p bin
 
       - name: Build APK
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          P4A_RELEASE: "0"
         run: |
           buildozer -v android debug
 
@@ -93,7 +116,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TAKWEED-Android-APK
+          name: TAKWEED-Customer-Coding-APK
           path: bin/*.apk
           if-no-files-found: warn
           retention-days: 14
