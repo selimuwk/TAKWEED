@@ -14,6 +14,12 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      ANDROID_HOME: /home/runner/.buildozer/android/platform/android-sdk
+      ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
+      P4A_RELEASE: "0"
+      ac_cv_func_getgrent: "no"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,7 +39,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git zip unzip \
+            git zip unzip curl \
             autoconf automake libtool \
             pkg-config cmake \
             build-essential \
@@ -46,58 +52,100 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install buildozer cython==0.29.36
 
-      - name: Prepare Android SDK and accept licenses
+      - name: Install Android Command-line Tools
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$SDK"
+          SDK="$ANDROID_HOME"
+          TOOLS="$SDK/cmdline-tools"
+          ZIP="$RUNNER_TEMP/commandlinetools.zip"
 
-          echo "===== Locate sdkmanager ====="
-          SDKMANAGER="$(find "$SDK" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          mkdir -p "$TOOLS" "$SDK"
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found in Buildozer SDK; Buildozer will initialize it."
-            buildozer android debug 2>&1 | tee sdk-init.log || true
-            SDKMANAGER="$(find "$SDK" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          curl -fL \
+            "https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip" \
+            -o "$ZIP"
+
+          echo "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583  $ZIP" \
+            | sha256sum -c -
+
+          rm -rf "$RUNNER_TEMP/android-cli-extract"
+          mkdir -p "$RUNNER_TEMP/android-cli-extract"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/android-cli-extract"
+
+          rm -rf "$TOOLS/latest"
+          mkdir -p "$TOOLS/latest"
+          cp -a "$RUNNER_TEMP/android-cli-extract/cmdline-tools/." "$TOOLS/latest/"
+
+          SDKMANAGER="$TOOLS/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+
+          # Compatibility path used by older Buildozer versions.
+          mkdir -p "$SDK/tools/bin"
+          ln -sf "$SDKMANAGER" "$SDK/tools/bin/sdkmanager"
+
+          if [ -x "$TOOLS/latest/bin/avdmanager" ]; then
+            ln -sf "$TOOLS/latest/bin/avdmanager" "$SDK/tools/bin/avdmanager"
           fi
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager could not be located."
-            find "$SDK" -maxdepth 5 -type f -print 2>/dev/null | head -200 || true
-            exit 1
-          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$TOOLS/latest/bin" >> "$GITHUB_PATH"
 
-          echo "Using sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --sdk_root="$SDK" --version
 
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          # sdkmanager may close the input after processing licenses.
           set +o pipefail
-          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses
           LICENSE_STATUS=${PIPESTATUS[1]}
           set -o pipefail
 
           if [ "$LICENSE_STATUS" -ne 0 ]; then
-            echo "ERROR: Android SDK license acceptance failed."
+            echo "Android SDK license acceptance failed."
             exit "$LICENSE_STATUS"
           fi
 
-          "$SDKMANAGER" --sdk_root="$SDK" "platform-tools" "build-tools;37.0.0"
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;37.0.0"
+
+          test -x "$ANDROID_HOME/build-tools/37.0.0/aidl"
+          test -x "$ANDROID_HOME/platform-tools/adb"
 
       - name: Verify source and configuration
+        shell: bash
         run: |
-          echo "===== Commit being built ====="
+          set -euo pipefail
+
+          echo "===== Commit ====="
           git rev-parse HEAD
 
           echo "===== Buildozer configuration ====="
           cat buildozer.spec
 
-          echo "===== Relevant settings ====="
-          grep -nE 'requirements|p4a.branch|android.ndk|android.ndk_api|android.minapi|android.api' buildozer.spec
-
-          echo "===== Check Python pins ====="
+          echo "===== Verify required settings ====="
           grep -q 'python3==3.13.7' buildozer.spec
           grep -q 'hostpython3==3.13.7' buildozer.spec
           grep -q 'p4a.branch = develop' buildozer.spec
+
+          echo "===== Verify Android SDK ====="
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version
+          test -x "$ANDROID_HOME/tools/bin/sdkmanager"
+          test -x "$ANDROID_HOME/build-tools/37.0.0/aidl"
 
           echo "===== Tool versions ====="
           python --version
@@ -106,24 +154,26 @@ jobs:
 
       - name: Clean failed Python build
         run: |
-          rm -rf .buildozer/android/platform/build-arm64-v8a/build/other_builds/python3
+          rm -rf \
+            .buildozer/android/platform/build-arm64-v8a/build/other_builds/python3
 
       - name: Build APK
         shell: bash
         run: |
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
-        env:
-          P4A_RELEASE: "0"
-          ac_cv_func_getgrent: "no"
 
       - name: Verify APK
         if: success()
+        shell: bash
         run: |
-          set -e
-          echo "===== APK files ====="
+          set -euo pipefail
+
           find bin -maxdepth 1 -type f -name "*.apk" -print
-          test -n "$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+
+          APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
+          echo "APK successfully created: $APK"
 
       - name: Upload APK
         if: success()
@@ -134,13 +184,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build logs
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: TAKWEED-Build-Logs
-          path: |
-            build.log
-            sdk-init.log
+          name: TAKWEED-Build-Log
+          path: build.log
           if-no-files-found: ignore
           retention-days: 7
