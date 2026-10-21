@@ -59,7 +59,7 @@ STATEMENT_REQUIRED_CLASSES = {
 }
 
 MAX_PHOTO_SIZE = 8 * 1024 * 1024
-GPS_TIMEOUT_SECONDS = 35
+GPS_TIMEOUT_SECONDS = 60
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(BASE_DIR, "assets", "fonts")
@@ -127,15 +127,41 @@ def arabic_display(value):
 
 
 def normalize_salesperson_id(value):
+    """Normalize salesperson codes without changing leading zeroes."""
     if value is None:
         return ""
 
-    value = str(value).strip()
+    value = str(value)
+    # Remove invisible characters and normalize whitespace / numeric digits.
+    value = value.replace("\u200b", "").replace("\ufeff", "")
+    value = value.replace("\u00a0", " ").strip()
+    value = value.translate(str.maketrans(
+        "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+        "01234567890123456789",
+    ))
+    value = re.sub(r"\s+", "", value)
 
     if value.endswith(".0"):
         value = value[:-2]
 
-    return value
+    return value.casefold()
+
+
+def normalize_key(value):
+    """Case/space/punctuation-insensitive dictionary key."""
+    value = str(value or "").replace("\u200b", "").replace("\ufeff", "")
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def find_dict_value(data, *keys, default=""):
+    if not isinstance(data, dict):
+        return default
+
+    wanted = {normalize_key(key) for key in keys}
+    for key, value in data.items():
+        if normalize_key(key) in wanted and value is not None:
+            return value
+    return default
 
 
 def valid_coordinates(lat, lon):
@@ -180,6 +206,8 @@ def api_post(payload):
 
 
 def get_value(data, *keys, default=""):
+    # Prefer exact spelling, then tolerate spaces/case/underscore differences
+    # commonly returned by Google Sheets / Apps Script.
     if not isinstance(data, dict):
         return default
 
@@ -187,7 +215,7 @@ def get_value(data, *keys, default=""):
         if key in data and data[key] is not None:
             return data[key]
 
-    return default
+    return find_dict_value(data, *keys, default=default)
 
 
 # =========================================================
@@ -306,7 +334,12 @@ class SectionTitle(Label):
         self.font_name = FONT_NAME
         self.font_size = dp(17)
         self.bold = True
-        self.halign = "left"
+        self.text = arabic_display(self.text)
+        self.halign = (
+            "right"
+            if any("\u0600" <= char <= "\u06ff" for char in self.text)
+            else "left"
+        )
         self.valign = "middle"
 
         if app:
@@ -392,14 +425,19 @@ class TakweedApp(App):
         color=None,
         align="left",
     ):
+        display_text = arabic_display(text)
+        effective_align = align
+        if align == "left" and any("\u0600" <= char <= "\u06ff" for char in str(text)):
+            effective_align = "right"
+
         label = Label(
-            text=arabic_display(text),
+            text=display_text,
             size_hint_y=None,
             height=height,
             font_name=FONT_NAME,
             font_size=dp(size),
             color=color or self.colors["text"],
-            halign=align,
+            halign=effective_align,
             valign="middle",
         )
 
@@ -439,8 +477,12 @@ class TakweedApp(App):
         hint,
         password=False,
         multiline=False,
+        rtl=None,
     ):
-        return TextInput(
+        if rtl is None:
+            rtl = any("\\u0600" <= ch <= "\\u06ff" for ch in str(hint))
+
+        field = TextInput(
             hint_text=hint,
             password=password,
             multiline=multiline,
@@ -459,7 +501,21 @@ class TakweedApp(App):
                 *self.colors["primary"][:3],
                 0.35,
             ),
+            halign="right" if rtl else "left",
         )
+
+        # Kivy versions differ in their RTL support. Set direction only when
+        # the installed TextInput exposes these properties.
+        try:
+            props = field.properties()
+            if "base_direction" in props:
+                field.base_direction = "rtl" if rtl else "ltr"
+            if "text_language" in props and rtl:
+                field.text_language = "ar"
+        except Exception:
+            pass
+
+        return field
 
     def make_spinner(self, values, text="اختر"):
         return Spinner(
@@ -638,7 +694,11 @@ class TakweedApp(App):
                 font_size=dp(size),
                 bold=size > 18,
                 color=color,
-                halign="left",
+                halign=(
+                    "right"
+                    if any("\u0600" <= char <= "\u06ff" for char in str(text))
+                    else "left"
+                ),
                 valign="middle",
             )
 
@@ -718,7 +778,9 @@ class TakweedApp(App):
             size=lambda obj, value: setattr(bg_rect, "size", value),
         )
 
-        root.add_widget(WidgetSpacer(dp(20)))
+        # Flexible top/bottom spacers keep the login panel centered,
+        # but slightly above the vertical midpoint on tall and short screens.
+        root.add_widget(BoxLayout(size_hint_y=0.30))
 
         logo = RoundedPanel(
             orientation="vertical",
@@ -772,13 +834,14 @@ class TakweedApp(App):
         )
 
         card.add_widget(self.make_label("اسم المستخدم"))
-        self.username_input = self.make_input("Username")
+        self.username_input = self.make_input("Username", rtl=False)
         card.add_widget(self.username_input)
 
         card.add_widget(self.make_label("كلمة المرور"))
         self.password_input = self.make_input(
             "Password",
             password=True,
+            rtl=False,
         )
         card.add_widget(self.password_input)
 
@@ -788,7 +851,7 @@ class TakweedApp(App):
 
         root.add_widget(card)
         root.add_widget(self.make_theme_button())
-        root.add_widget(WidgetSpacer(dp(10)))
+        root.add_widget(BoxLayout(size_hint_y=0.70))
 
         self.login_screen.add_widget(root)
 
@@ -842,6 +905,20 @@ class TakweedApp(App):
                 "SalespersonID",
                 "salespersonId",
                 "Salesperson Id",
+                "Sales Person ID",
+                "Sales Person Code",
+                "Salesperson Code",
+                "Rep Code",
+                "Employee ID",
+                default=get_value(
+                    data,
+                    "Salesperson ID",
+                    "SalespersonID",
+                    "Sales Person ID",
+                    "Sales Person Code",
+                    "Rep Code",
+                    "Employee ID",
+                ),
             )
         )
 
@@ -995,21 +1072,27 @@ class TakweedApp(App):
         )
 
     def on_mapping_loaded(self, result):
-        data = (
-            result.get("data", result)
-            if isinstance(result, dict)
-            else {}
-        )
+        # Apps Script responses may wrap the records in data / mapping /
+        # records, and the column headers may differ in spaces or casing.
+        records = []
+        node = result
 
-        if isinstance(data, list):
-            records = data
-        elif isinstance(data, dict):
-            records = data.get(
-                "mapping",
-                data.get("records", data.get("data", [])),
-            )
-        else:
-            records = []
+        for _ in range(5):
+            if isinstance(node, list):
+                records = node
+                break
+            if not isinstance(node, dict):
+                break
+
+            candidate = None
+            for key in ("mapping", "records", "data", "rows", "values"):
+                candidate = find_dict_value(node, key, default=None)
+                if candidate is not None:
+                    break
+
+            if candidate is None:
+                break
+            node = candidate
 
         self.mapping = {}
 
@@ -1017,26 +1100,48 @@ class TakweedApp(App):
             if not isinstance(row, dict):
                 continue
 
-            sid = normalize_salesperson_id(
-                get_value(
-                    row,
-                    "Salesperson ID",
-                    "SalespersonID",
-                    "Salesperson Id",
-                )
+            sid_value = get_value(
+                row,
+                "Salesperson ID",
+                "SalespersonID",
+                "Salesperson Id",
+                "Sales Person ID",
+                "Sales Person Code",
+                "Salesperson Code",
+                "Rep Code",
+                "Employee ID",
             )
+            sid = normalize_salesperson_id(sid_value)
 
             if sid:
                 self.mapping[sid] = row
 
-        self.salesperson_mapping_row = self.mapping.get(
-            self.salesperson_id, {}
-        )
+        normalized_user_id = normalize_salesperson_id(self.salesperson_id)
+        self.salesperson_mapping_row = self.mapping.get(normalized_user_id, {})
 
-        if self.salesperson_id and not self.salesperson_mapping_row:
+        if self.salesperson_mapping_row:
+            self.apply_salesperson_mapping()
+            print(
+                "SALESPERSON_MAPPING matched:",
+                repr(self.salesperson_id),
+                "->",
+                repr(get_value(
+                    self.salesperson_mapping_row,
+                    "Salesperson ID", "SalespersonID", "Sales Person ID",
+                    "Salesperson Code", "Rep Code",
+                )),
+            )
+        elif self.salesperson_id:
+            available_ids = list(self.mapping.keys())[:10]
             self.show_message(
-                "تنبيه",
-                "المندوب غير موجود في جدول SALESPERSON_MAPPING الحالي.",
+                "المندوب غير موجود",
+                "لم يتم العثور على كود المندوب بعد توحيد شكل الكود. "
+                "تأكد أن API يعيد عمود Salesperson ID الصحيح وأنه يعيد "
+                "بيانات الشيت الحالي. "
+                + "عدد الأكواد المحمّلة: "
+                + str(len(self.mapping))
+                + ". أمثلة: "
+                + (", ".join(available_ids) if available_ids else "لا توجد بيانات"),
             )
 
     def apply_salesperson_mapping(self):
@@ -1050,6 +1155,9 @@ class TakweedApp(App):
             "Statement Name",
             "StatementName",
             "statementName",
+            "User Defined 1",
+            "UserDefined1",
+            "Comment1",
         )
 
         if str(statement).strip():
@@ -1091,7 +1199,7 @@ class TakweedApp(App):
             )
         )
 
-        self.customer_name = self.make_input("اسم العميل")
+        self.customer_name = self.make_input("اسم العميل", rtl=True)
         card.add_widget(self.make_label("Customer Name"))
         card.add_widget(self.customer_name)
 
@@ -1106,7 +1214,7 @@ class TakweedApp(App):
         card.add_widget(self.make_label("Statement Name"))
         card.add_widget(self.statement_name)
 
-        self.contact_person = self.make_input("Contact Person")
+        self.contact_person = self.make_input("Contact Person", rtl=True)
         card.add_widget(self.make_label("Contact Person"))
         card.add_widget(self.contact_person)
 
@@ -1120,8 +1228,8 @@ class TakweedApp(App):
             )
         )
 
-        self.address1 = self.make_input("Address 1")
-        self.address2 = self.make_input("Address 2")
+        self.address1 = self.make_input("Address 1", rtl=True)
+        self.address2 = self.make_input("Address 2", rtl=True)
 
         card.add_widget(self.make_label("Address 1"))
         card.add_widget(self.address1)
@@ -1129,7 +1237,8 @@ class TakweedApp(App):
         card.add_widget(self.address2)
 
         self.area_search = self.make_input(
-            "اكتب اسم المنطقة للبحث"
+            "اكتب اسم المنطقة للبحث",
+            rtl=True,
         )
         card.add_widget(self.make_label("ابحث عن المنطقة"))
         card.add_widget(self.area_search)
@@ -1339,20 +1448,28 @@ class TakweedApp(App):
             )
 
     def on_location_permissions(self, permissions, grants):
-        if not grants or not any(grants):
+        granted = False
+        try:
+            granted = any(
+                value is True
+                or str(value).strip().lower() in ("1", "true", "granted")
+                for value in (grants or [])
+            )
+        except Exception:
+            granted = False
+
+        if not granted:
             Clock.schedule_once(
                 lambda dt: self.show_message(
                     "صلاحية الموقع",
-                    "اسمح للتطبيق بالوصول إلى الموقع من إعدادات الهاتف.",
+                    "اسمح للتطبيق بصلاحية الموقع الدقيق من إعدادات Android، "
+                    "ثم حاول مرة أخرى.",
                 ),
                 0,
             )
             return
 
-        Clock.schedule_once(
-            lambda dt: self.start_gps(),
-            0,
-        )
+        Clock.schedule_once(lambda dt: self.start_gps(), 0)
 
     def start_gps(self):
         try:
@@ -1392,12 +1509,12 @@ class TakweedApp(App):
             self.stop_gps()
 
             self.gps_status.text = arabic_display(
-                "لم يصل الموقع خلال 35 ثانية. فعّل GPS ثم حاول مرة أخرى."
+                "لم يصل الموقع خلال 60 ثانية. فعّل GPS ثم حاول مرة أخرى."
             )
 
             self.show_message(
                 "انتهت مهلة GPS",
-                "لم يصل موقع صالح خلال 35 ثانية. فعّل الموقع، "
+                "لم يصل موقع صالح خلال 60 ثانية. فعّل الموقع، "
                 "جرّب مكانًا مفتوحًا، ثم أعد المحاولة.",
             )
 
@@ -1584,61 +1701,174 @@ class TakweedApp(App):
     # -----------------------------------------------------
 
     def pick_photo(self):
+        """Open Android's document picker; handle both filesystem paths and content:// URIs."""
+        if platform == "android":
+            # Native ACTION_GET_CONTENT returns content:// URIs on modern Android.
+            try:
+                from jnius import autoclass
+                from android import activity
+
+                Intent = autoclass("android.content.Intent")
+                PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                intent = Intent(Intent.ACTION_GET_CONTENT)
+                intent.setType("image/*")
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                chooser = Intent.createChooser(intent, "اختيار صورة للمحل")
+                self._photo_activity_callback = self._on_android_photo_result
+                self._photo_activity_bound = True
+                activity.bind(on_activity_result=self._photo_activity_callback)
+                PythonActivity.mActivity.startActivityForResult(chooser, 7321)
+                return
+            except Exception as exc:
+                print("Native photo picker unavailable; trying Plyer:", exc)
+                try:
+                    from android import activity
+                    if getattr(self, "_photo_activity_bound", False):
+                        activity.unbind(on_activity_result=self._photo_activity_callback)
+                        self._photo_activity_bound = False
+                except Exception:
+                    pass
+
         try:
             from plyer import filechooser
-
             filechooser.open_file(
                 on_selection=self.on_photo_selected,
-                filters=[
-                    [
-                        "Image files",
-                        "*.png",
-                        "*.jpg",
-                        "*.jpeg",
-                        "*.webp",
-                    ]
-                ],
+                filters=[["Image files", "*.png", "*.jpg", "*.jpeg", "*.webp"]],
             )
-
         except Exception as exc:
-            self.show_message(
-                "الصور",
-                "تعذر فتح معرض الصور.\n" + str(exc),
-            )
+            self.show_message("الصور", "تعذر فتح معرض الصور.\n" + str(exc))
+
+    def _on_android_photo_result(self, request_code, result_code, intent):
+        if request_code != 7321:
+            return
+
+        try:
+            from android import activity
+            if getattr(self, "_photo_activity_bound", False):
+                activity.unbind(on_activity_result=self._photo_activity_callback)
+                self._photo_activity_bound = False
+        except Exception:
+            pass
+
+        # RESULT_OK == -1
+        if result_code != -1 or intent is None:
+            return
+
+        try:
+            uri = intent.getData()
+            if uri is None:
+                self.show_message("الصور", "لم يتم استلام صورة من المعرض.")
+                return
+
+            uri_string = str(uri.toString())
+            display_name = self._get_uri_display_name(uri)
+            self._load_photo(uri_string, display_name)
+        except Exception as exc:
+            self.show_message("الصور", "تعذر قراءة الصورة المختارة: " + str(exc))
+
+    def _get_uri_display_name(self, uri):
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            OpenableColumns = autoclass("android.provider.OpenableColumns")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            cursor = resolver.query(uri, None, None, None, None)
+            if cursor is not None:
+                try:
+                    if cursor.moveToFirst():
+                        index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if index >= 0:
+                            value = cursor.getString(index)
+                            if value:
+                                return str(value)
+                finally:
+                    cursor.close()
+        except Exception:
+            pass
+        return "customer_photo.jpg"
+
+    def _read_content_uri(self, uri_string):
+        """Read a content:// URI through Android ContentResolver."""
+        from jnius import autoclass, jarray
+
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Uri = autoclass("android.net.Uri")
+        ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
+
+        activity = PythonActivity.mActivity
+        uri = Uri.parse(uri_string)
+        stream = activity.getContentResolver().openInputStream(uri)
+        if stream is None:
+            raise Exception("لم يستطع Android فتح الصورة.")
+
+        output = ByteArrayOutputStream()
+        buffer = jarray("b")([0] * 8192)
+        try:
+            while True:
+                count = stream.read(buffer)
+                if count == -1:
+                    break
+                if count > 0:
+                    output.write(buffer, 0, count)
+                    if output.size() > MAX_PHOTO_SIZE:
+                        raise Exception("حجم الصورة أكبر من 8 MB. اختر صورة أصغر.")
+            java_bytes = output.toByteArray()
+            return bytes((int(value) & 0xFF) for value in java_bytes)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            try:
+                output.close()
+            except Exception:
+                pass
 
     def on_photo_selected(self, selection):
         if not selection:
             return
 
-        path = selection[0]
+        selected = selection[0] if isinstance(selection, (list, tuple)) else selection
+        if selected is None:
+            return
 
+        path = str(selected)
+        self._load_photo(path, os.path.basename(path) or "customer_photo.jpg")
+
+    def _load_photo(self, path, file_name="customer_photo.jpg"):
         try:
-            if not os.path.isfile(path):
-                self.show_message(
-                    "الصور",
-                    "تعذر الوصول إلى ملف الصورة المختار.",
-                )
-                return
+            if path.startswith("content://"):
+                raw_bytes = self._read_content_uri(path)
+            elif path.startswith("file://"):
+                local_path = path[7:]
+                if not os.path.isfile(local_path):
+                    raise Exception("تعذر الوصول إلى ملف الصورة المختار.")
+                if os.path.getsize(local_path) > MAX_PHOTO_SIZE:
+                    raise Exception("حجم الصورة أكبر من 8 MB. اختر صورة أصغر.")
+                with open(local_path, "rb") as file:
+                    raw_bytes = file.read()
+            else:
+                if not os.path.isfile(path):
+                    raise Exception(
+                        "مسار الصورة غير قابل للقراءة. جرّب اختيارها من معرض الصور مرة أخرى."
+                    )
+                if os.path.getsize(path) > MAX_PHOTO_SIZE:
+                    raise Exception("حجم الصورة أكبر من 8 MB. اختر صورة أصغر.")
+                with open(path, "rb") as file:
+                    raw_bytes = file.read()
 
-            if os.path.getsize(path) > MAX_PHOTO_SIZE:
-                self.show_message(
-                    "حجم الصورة",
-                    "حجم الصورة أكبر من 8 MB. اختر صورة أصغر.",
-                )
-                return
+            if not raw_bytes:
+                raise Exception("ملف الصورة فارغ أو غير قابل للقراءة.")
+            if len(raw_bytes) > MAX_PHOTO_SIZE:
+                raise Exception("حجم الصورة أكبر من 8 MB. اختر صورة أصغر.")
 
-            with open(path, "rb") as file:
-                encoded = base64.b64encode(
-                    file.read()
-                ).decode("utf-8")
+            mime_type = mimetypes.guess_type(file_name)[0]
+            if not mime_type:
+                mime_type = "image/png" if raw_bytes[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
 
-            mime_type = (
-                mimetypes.guess_type(path)[0]
-                or "image/jpeg"
-            )
-
+            encoded = base64.b64encode(raw_bytes).decode("ascii")
             self.photos.append({
-                "fileName": os.path.basename(path),
+                "fileName": os.path.basename(file_name) or "customer_photo.jpg",
                 "mimeType": mime_type,
                 "base64": encoded,
             })
@@ -1646,12 +1876,8 @@ class TakweedApp(App):
             self.photo_status.text = arabic_display(
                 f"تم اختيار {len(self.photos)} صورة"
             )
-
         except Exception as exc:
-            self.show_message(
-                "الصور",
-                "تعذر قراءة الصورة: " + str(exc),
-            )
+            self.show_message("الصور", "تعذر قراءة الصورة: " + str(exc))
 
     # -----------------------------------------------------
     # SUBMIT CUSTOMER REQUEST
@@ -1704,7 +1930,7 @@ class TakweedApp(App):
 
             if (
                 not self.mapping
-                or self.salesperson_id not in self.mapping
+                or normalize_salesperson_id(self.salesperson_id) not in self.mapping
             ):
                 self.show_message(
                     "بيانات المندوب",
@@ -1714,7 +1940,7 @@ class TakweedApp(App):
 
         area = self.selected_area
         mapping_row = self.mapping.get(
-            self.salesperson_id,
+            normalize_salesperson_id(self.salesperson_id),
             {},
         )
 
@@ -1751,13 +1977,13 @@ class TakweedApp(App):
             "Area": get_value(area, "Area"),
             "Salesperson ID": self.salesperson_id,
             "Sales Territory": get_value(
-                mapping_row, "Sales Territory"
+                mapping_row, "Sales Territory", "SalesTerritory"
             ),
             "User Defined 1": get_value(
-                mapping_row, "User Defined 1"
+                mapping_row, "User Defined 1", "UserDefined1"
             ),
             "User Defined 2": get_value(
-                mapping_row, "User Defined 2"
+                mapping_row, "User Defined 2", "UserDefined2"
             ),
             "Comment1": get_value(mapping_row, "Comment1"),
             "Comment2": get_value(mapping_row, "Comment2"),
@@ -2104,6 +2330,7 @@ class TakweedApp(App):
         notes_input = self.make_input(
             "اكتب الملاحظات هنا",
             multiline=True,
+            rtl=True,
         )
 
         number_input = self.make_input(
