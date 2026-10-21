@@ -657,10 +657,25 @@ class TakweedApp(App):
 
     def finish_api(self, popup, callback, result):
         if popup:
-            popup.dismiss()
+            try:
+                popup.dismiss()
+            except Exception:
+                pass
 
         if callback:
-            callback(result)
+            try:
+                callback(result)
+            except Exception as exc:
+                # Never let a post-login/API callback exception terminate the app.
+                import traceback
+                traceback.print_exc()
+                try:
+                    self.show_message(
+                        "خطأ بعد تسجيل الدخول",
+                        f"حدث خطأ أثناء تجهيز الشاشة التالية.\n{type(exc).__name__}: {exc}",
+                    )
+                except Exception:
+                    print("Callback error:", repr(exc))
 
     def fail_api(self, popup, callback, error):
         if popup:
