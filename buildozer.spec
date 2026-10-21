@@ -1,4 +1,3 @@
-
 [app]
 
 title = TAKWEED Customer Coding
@@ -7,6 +6,7 @@ package.domain = com.mohamedselim
 
 source.dir = .
 source.include_exts = py,kv,png,jpg,jpeg,json,txt,ttf
+source.include_patterns = assets/fonts/*.ttf
 
 version = 1.0.0
 

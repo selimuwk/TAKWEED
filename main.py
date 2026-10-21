@@ -66,6 +66,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(BASE_DIR, "assets", "fonts")
 ARABIC_FONT = os.path.join(FONT_DIR, "NotoNaskhArabic.ttf")
 
+# Bundle a real Arabic font with the project. Roboto fallback often renders
+# Arabic disconnected or inconsistently in Kivy/SDL on Android.
 FONT_NAME = "Roboto"
 
 if os.path.isfile(ARABIC_FONT):
@@ -1604,11 +1606,14 @@ class TakweedApp(App):
             )
 
         except Exception as exc:
+            print("GPS startup exception:", repr(exc))
             self.gps_started = False
             self.cancel_gps_timeout()
+            self.set_gps_status("فشل تشغيل خدمة الموقع: " + str(exc))
             self.show_message(
                 "GPS",
-                "تعذر تشغيل GPS. تأكد من تفعيل خدمة الموقع.\n"
+                "تعذر تشغيل خدمة الموقع. تأكد من تفعيل الموقع من إعدادات الهاتف، "
+                "وأن صلاحية الموقع مسموحة للتطبيق.\n\n"
                 + str(exc),
             )
 
@@ -1654,7 +1659,8 @@ class TakweedApp(App):
             pass
 
     def on_gps_status(self, stype, status):
-        message = f"{stype}: {status}"
+        message = f"حالة الموقع ({stype}): {status}"
+        print("GPS provider status:", stype, status)
 
         Clock.schedule_once(
             lambda dt: self.set_gps_status(message),
@@ -1869,8 +1875,19 @@ class TakweedApp(App):
 
         try:
             uri = intent.getData()
+            # Some document providers return the selected item through ClipData.
             if uri is None:
-                self.show_message("الصور", "لم يتم استلام صورة من المعرض.")
+                try:
+                    clip_data = intent.getClipData()
+                    if clip_data is not None and clip_data.getItemCount() > 0:
+                        uri = clip_data.getItemAt(0).getUri()
+                except Exception:
+                    uri = None
+            if uri is None:
+                self.show_message(
+                    "الصور",
+                    "لم يستلم التطبيق مسار الصورة من المعرض. جرّب اختيار صورة واحدة من تطبيق الصور أو الملفات."
+                )
                 return
 
             uri_string = str(uri.toString())
