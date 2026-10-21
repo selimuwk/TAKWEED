@@ -481,10 +481,10 @@ class TakweedApp(App):
         rtl=None,
     ):
         if rtl is None:
-            rtl = any("\\u0600" <= ch <= "\\u06ff" for ch in str(hint))
+            rtl = any("\u0600" <= ch <= "\u06ff" for ch in str(hint))
 
         field = TextInput(
-            hint_text=hint,
+            hint_text=arabic_display(hint) if rtl else hint,
             password=password,
             multiline=multiline,
             size_hint_y=None,
@@ -505,16 +505,18 @@ class TakweedApp(App):
             halign="right" if rtl else "left",
         )
 
-        # Kivy versions differ in their RTL support. Set direction only when
-        # the installed TextInput exposes these properties.
+        # Keep the original Unicode text untouched (important for Sheets/API),
+        # but ask Kivy/Pango to lay out Arabic inputs right-to-left.
         try:
             props = field.properties()
             if "base_direction" in props:
                 field.base_direction = "rtl" if rtl else "ltr"
             if "text_language" in props and rtl:
                 field.text_language = "ar"
-        except Exception:
-            pass
+            # Re-apply alignment after direction properties are assigned.
+            field.halign = "right" if rtl else "left"
+        except Exception as exc:
+            print("TextInput direction setup warning:", repr(exc))
 
         return field
 
@@ -1088,52 +1090,128 @@ class TakweedApp(App):
         )
 
     def on_mapping_loaded(self, result):
-        # Apps Script responses may wrap the records in data / mapping /
-        # records, and the column headers may differ in spaces or casing.
+        """Read mapping responses from both old and new Apps Script versions.
+
+        The API returns a single `mapping` object AND a complete `mappings`
+        list. Do not descend into the single mapping object before checking
+        the list fields, otherwise the client incorrectly reports zero codes.
+        """
         records = []
-        node = result
 
-        for _ in range(5):
+        def find_records(node, depth=0):
+            if depth > 6 or node is None:
+                return []
             if isinstance(node, list):
-                records = node
-                break
+                # A list of row dictionaries, or Google Sheets-style rows.
+                if not node:
+                    return []
+                if all(isinstance(item, (dict, list, tuple)) for item in node):
+                    return node
+                return []
             if not isinstance(node, dict):
-                break
+                return []
 
-            candidate = None
-            for key in ("mapping", "records", "data", "rows", "values"):
+            # Prefer the full list before the single-row `mapping` object.
+            list_keys = (
+                "mappings", "records", "rows", "values",
+                "salespersonMappings", "salesperson_mapping",
+            )
+            for key in list_keys:
                 candidate = find_dict_value(node, key, default=None)
-                if candidate is not None:
-                    break
+                if isinstance(candidate, list):
+                    return candidate
 
-            if candidate is None:
-                break
-            node = candidate
+            # Older API builds may wrap their response in `data` or `result`.
+            for key in ("data", "result", "response"):
+                candidate = find_dict_value(node, key, default=None)
+                found = find_records(candidate, depth + 1)
+                if found:
+                    return found
 
+            # Some API versions return mapping as a list; support that too.
+            candidate = find_dict_value(node, "mapping", default=None)
+            if isinstance(candidate, list):
+                return candidate
+            if isinstance(candidate, dict):
+                # Single-row mapping object: treat it as one row only if it
+                # contains a salesperson ID field.
+                sid = get_value(
+                    candidate,
+                    "Salesperson ID", "SalespersonID", "Salesperson Id",
+                    "Sales Person ID", "Sales Person Code", "Salesperson Code",
+                    "Rep Code", "Employee ID",
+                )
+                if sid not in (None, ""):
+                    return [candidate]
+            return []
+
+        records = find_records(result)
         self.mapping = {}
 
-        for row in records if isinstance(records, list) else []:
+        for row in records:
+            # Support both header-keyed objects and array rows when the API
+            # returns raw Google Sheets values instead of objects.
+            if isinstance(row, (list, tuple)):
+                continue  # Raw arrays need headers; don't guess column positions.
             if not isinstance(row, dict):
                 continue
 
             sid_value = get_value(
                 row,
-                "Salesperson ID",
-                "SalespersonID",
-                "Salesperson Id",
-                "Sales Person ID",
-                "Sales Person Code",
-                "Salesperson Code",
-                "Rep Code",
-                "Employee ID",
+                "Salesperson ID", "SalespersonID", "Salesperson Id",
+                "Sales Person ID", "Sales Person Code", "Salesperson Code",
+                "Rep Code", "Employee ID",
             )
             sid = normalize_salesperson_id(sid_value)
-
             if sid:
                 self.mapping[sid] = row
 
+        # If the response only contained the mapping for the signed-in user,
+        # preserve it as a fallback without requiring a full-list response.
+        if not self.mapping and isinstance(result, dict):
+            single = find_dict_value(result, "mapping", default=None)
+            if isinstance(single, dict):
+                sid_value = get_value(
+                    single,
+                    "Salesperson ID", "SalespersonID", "Salesperson Id",
+                    "Sales Person ID", "Sales Person Code", "Salesperson Code",
+                    "Rep Code", "Employee ID",
+                    default=get_value(
+                        result, "salespersonId", "Salesperson ID", "SalespersonID"
+                    ),
+                )
+                sid = normalize_salesperson_id(sid_value)
+                if sid:
+                    single = dict(single)
+                    single.setdefault("Salesperson ID", sid)
+                    self.mapping[sid] = single
+
         normalized_user_id = normalize_salesperson_id(self.salesperson_id)
         self.salesperson_mapping_row = self.mapping.get(normalized_user_id, {})
+
+        # Also support a single-mapping response where the API puts the ID
+        # only at the top level and omits it from the nested mapping object.
+        if not self.salesperson_mapping_row and isinstance(result, dict):
+            top_sid = normalize_salesperson_id(
+                get_value(result, "salespersonId", "Salesperson ID", "SalespersonID")
+            )
+            single = find_dict_value(result, "mapping", default=None)
+            if top_sid and top_sid == normalized_user_id and isinstance(single, dict):
+                self.salesperson_mapping_row = dict(single)
+                self.salesperson_mapping_row.setdefault("Salesperson ID", top_sid)
+                self.mapping[top_sid] = self.salesperson_mapping_row
+
+        total_reported = get_value(
+            result, "totalMappings", "total", "count", default=None
+        ) if isinstance(result, dict) else None
+
+        print(
+            "SALESPERSON_MAPPING response type:", type(result).__name__,
+            "records:", len(records),
+            "loaded IDs:", len(self.mapping),
+            "reported total:", total_reported,
+            "user ID:", repr(self.salesperson_id),
+        )
 
         if self.salesperson_mapping_row:
             self.apply_salesperson_mapping()
@@ -1151,13 +1229,17 @@ class TakweedApp(App):
             available_ids = list(self.mapping.keys())[:10]
             self.show_message(
                 "المندوب غير موجود",
-                "لم يتم العثور على كود المندوب بعد توحيد شكل الكود. "
-                "تأكد أن API يعيد عمود Salesperson ID الصحيح وأنه يعيد "
-                "بيانات الشيت الحالي. "
-                + "عدد الأكواد المحمّلة: "
-                + str(len(self.mapping))
-                + ". أمثلة: "
+                "لم يتم العثور على كود المندوب. "
+                "تم تحميل " + str(len(self.mapping)) + " كود من الـ API. "
+                "راجع عمود Salesperson ID وصيغة استجابة الـ API. "
+                "أمثلة الأكواد: "
                 + (", ".join(available_ids) if available_ids else "لا توجد بيانات"),
+            )
+        elif self.is_rep():
+            self.show_message(
+                "كود المندوب غير موجود في الحساب",
+                "تم تسجيل الدخول، لكن استجابة الحساب لا تحتوي على Salesperson ID. "
+                "راجع عمود Salesperson ID في شيت المستخدمين.",
             )
 
     def apply_salesperson_mapping(self):
@@ -1464,22 +1546,32 @@ class TakweedApp(App):
             )
 
     def on_location_permissions(self, permissions, grants):
-        granted = False
-        try:
-            granted = any(
-                value is True
-                or str(value).strip().lower() in ("1", "true", "granted")
-                for value in (grants or [])
-            )
-        except Exception:
-            granted = False
+        print("GPS permission callback:", permissions, grants)
 
-        if not granted:
+        def is_granted(value):
+            # android.permissions uses PackageManager.PERMISSION_GRANTED == 0.
+            return (
+                value is True
+                or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0)
+                or str(value).strip().lower() in ("0", "true", "granted", "permission_granted")
+            )
+
+        permission_pairs = list(zip(permissions or [], grants or []))
+        location_granted = any(
+            is_granted(grant)
+            for permission, grant in permission_pairs
+            if "LOCATION" in str(permission).upper()
+        )
+        # Some Android/python-for-android versions return only grants.
+        if not permission_pairs:
+            location_granted = any(is_granted(value) for value in (grants or []))
+
+        if not location_granted:
             Clock.schedule_once(
                 lambda dt: self.show_message(
                     "صلاحية الموقع",
-                    "اسمح للتطبيق بصلاحية الموقع الدقيق من إعدادات Android، "
-                    "ثم حاول مرة أخرى.",
+                    "لم يتم منح صلاحية الموقع. افتح إعدادات التطبيق في Android، "
+                    "وفعّل الموقع أثناء استخدام التطبيق، ثم حاول مرة أخرى.",
                 ),
                 0,
             )
@@ -1726,9 +1818,13 @@ class TakweedApp(App):
 
                 Intent = autoclass("android.content.Intent")
                 PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                intent = Intent(Intent.ACTION_GET_CONTENT)
+                try:
+                    intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                except Exception:
+                    intent = Intent(Intent.ACTION_GET_CONTENT)
                 intent.setType("image/*")
                 intent.addCategory(Intent.CATEGORY_OPENABLE)
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 chooser = Intent.createChooser(intent, "اختيار صورة للمحل")
                 self._photo_activity_callback = self._on_android_photo_result
                 self._photo_activity_bound = True
@@ -1752,6 +1848,7 @@ class TakweedApp(App):
                 filters=[["Image files", "*.png", "*.jpg", "*.jpeg", "*.webp"]],
             )
         except Exception as exc:
+            print("Photo picker error:", repr(exc))
             self.show_message("الصور", "تعذر فتح معرض الصور.\n" + str(exc))
 
     def _on_android_photo_result(self, request_code, result_code, intent):
