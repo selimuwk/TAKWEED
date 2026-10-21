@@ -6,6 +6,7 @@ import base64
 import mimetypes
 import threading
 import time
+import re
 
 import requests
 import arabic_reshaper
